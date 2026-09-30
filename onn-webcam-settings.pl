@@ -6,15 +6,28 @@ use Tk;
 # ONN Webcam V4L2 Settings GUI
 # All controls from v4l2-ctl -L for Walmart ONN webcam
 # Ubuntu 24.04
+# Added: frame rate control (v4l2-ctl --set-parm) and slow-shutter night presets
 
 my $mw = MainWindow->new(-title => 'ONN Webcam Settings');
-$mw->geometry('520x920');
+$mw->geometry('520x1060');
 
 my $device = '/dev/video0';
 
 sub apply_ctrl {
     my ($ctrl, $val) = @_;
     system("v4l2-ctl -d $device --set-ctrl $ctrl=$val 2>/dev/null");
+}
+
+# Frame rate is not a --set-ctrl control; it is a stream parameter (--set-parm).
+# The driver rounds to the nearest rate the camera supports for the current format.
+sub set_fps {
+    my ($f) = @_;
+    system("v4l2-ctl -d $device --set-parm=$f 2>/dev/null");
+}
+
+sub get_fps {
+    my $out = `v4l2-ctl -d $device --get-parm 2>/dev/null`;
+    return ($out =~ /Frames per second:\s*([\d.]+)/) ? $1 : '?';
 }
 
 sub make_slider {
@@ -111,6 +124,7 @@ $ae_frame->Radiobutton(-text => 'Manual', -variable => \$ae, -value => 1,
 $ae_frame->Radiobutton(-text => 'Aperture Priority', -variable => \$ae, -value => 3,
     -command => sub { apply_ctrl('auto_exposure', $ae); })->pack(-side => 'left');
 
+# Exposure is in 100 microsecond units: 1000 = 100 ms. It cannot exceed the frame interval.
 make_slider($mw, 'Exposure Time Absolute', 'exposure_time_absolute', 1,    5000,  157, $row++);
 
 # Exposure Dynamic Framerate checkbox
@@ -143,12 +157,40 @@ $mw->Checkbutton(
     -command  => sub { apply_ctrl('privacy', $priv); },
 )->grid(-row => $row++, -column => 0, -columnspan => 3, -pady => 3);
 
+# ---- Frame Rate ----
+$mw->Label(-text => '--- Frame Rate ---', -font => 'Helvetica 11 bold')
+    ->grid(-row => $row++, -column => 0, -columnspan => 3, -pady => 5);
+
+my $fps = 30;
+my $fps_status;
+$mw->Label(-text => 'Frame Rate (fps):', -width => 28, -anchor => 'w')
+    ->grid(-row => $row, -column => 0, -sticky => 'w', -padx => 5);
+my $fps_frame = $mw->Frame->grid(-row => $row++, -column => 1, -columnspan => 2);
+for my $f (30, 15, 10, 7.5, 5) {
+    $fps_frame->Radiobutton(
+        -text     => $f,
+        -variable => \$fps,
+        -value    => $f,
+        -command  => sub {
+            set_fps($fps);
+            $fps_status->configure(-text => 'Actual: ' . get_fps() . ' fps');
+        },
+    )->pack(-side => 'left');
+}
+
+$fps_status = $mw->Label(-text => 'Actual: (click Check)', -anchor => 'w');
+$fps_status->grid(-row => $row, -column => 0, -columnspan => 2, -sticky => 'w', -padx => 5);
+$mw->Button(-text => 'Check', -command => sub {
+    $fps_status->configure(-text => 'Actual: ' . get_fps() . ' fps');
+})->grid(-row => $row++, -column => 2, -padx => 5);
+
 # ---- Preset Buttons ----
 $mw->Label(-text => '--- Presets ---', -font => 'Helvetica 11 bold')
     ->grid(-row => $row++, -column => 0, -columnspan => 3, -pady => 5);
 
 my $btn_frame1 = $mw->Frame->grid(-row => $row++, -column => 0, -columnspan => 3, -pady => 5);
 my $btn_frame2 = $mw->Frame->grid(-row => $row++, -column => 0, -columnspan => 3, -pady => 5);
+my $btn_frame3 = $mw->Frame->grid(-row => $row++, -column => 0, -columnspan => 3, -pady => 5);
 
 $btn_frame1->Button(-text => 'Night', -bg => '#223', -fg => 'white', -width => 12, -command => sub {
     apply_ctrl('auto_exposure', 3);
@@ -220,6 +262,8 @@ $btn_frame2->Button(-text => 'Cloudy Day', -bg => '#aab', -fg => 'black', -width
 })->pack(-side => 'left', -padx => 5);
 
 $btn_frame2->Button(-text => 'Defaults', -width => 12, -command => sub {
+    $fps = 30;
+    set_fps(30);
     apply_ctrl('brightness', 0);
     apply_ctrl('contrast', 32);
     apply_ctrl('saturation', 64);
@@ -239,6 +283,48 @@ $btn_frame2->Button(-text => 'Defaults', -width => 12, -command => sub {
     apply_ctrl('focus_automatic_continuous', 1);
     apply_ctrl('zoom_absolute', 0);
     apply_ctrl('privacy', 0);
+})->pack(-side => 'left', -padx => 5);
+
+# Slow-shutter night presets: lower the frame rate FIRST, then set a longer
+# manual exposure that fits inside the new frame interval.
+#   10 fps = 100 ms per frame = exposure_time_absolute max ~1000
+#    5 fps = 200 ms per frame = exposure_time_absolute max ~2000
+$btn_frame3->Button(-text => 'Night 10fps', -bg => '#113', -fg => 'white', -width => 12, -command => sub {
+    $fps = 10;
+    set_fps(10);
+    apply_ctrl('auto_exposure', 1);
+    sleep(1);
+    apply_ctrl('exposure_dynamic_framerate', 0);
+    apply_ctrl('exposure_time_absolute', 900);
+    apply_ctrl('gain', 100);
+    apply_ctrl('brightness', 32);
+    apply_ctrl('contrast', 20);
+    apply_ctrl('saturation', 30);
+    apply_ctrl('sharpness', 3);
+    apply_ctrl('backlight_compensation', 12);
+    apply_ctrl('focus_automatic_continuous', 0);
+    apply_ctrl('focus_absolute', 51);
+    apply_ctrl('white_balance_automatic', 1);
+    $fps_status->configure(-text => 'Actual: ' . get_fps() . ' fps');
+})->pack(-side => 'left', -padx => 5);
+
+$btn_frame3->Button(-text => 'Night 5fps', -bg => '#001', -fg => 'white', -width => 12, -command => sub {
+    $fps = 5;
+    set_fps(5);
+    apply_ctrl('auto_exposure', 1);
+    sleep(1);
+    apply_ctrl('exposure_dynamic_framerate', 0);
+    apply_ctrl('exposure_time_absolute', 1800);
+    apply_ctrl('gain', 100);
+    apply_ctrl('brightness', 32);
+    apply_ctrl('contrast', 20);
+    apply_ctrl('saturation', 30);
+    apply_ctrl('sharpness', 3);
+    apply_ctrl('backlight_compensation', 12);
+    apply_ctrl('focus_automatic_continuous', 0);
+    apply_ctrl('focus_absolute', 51);
+    apply_ctrl('white_balance_automatic', 1);
+    $fps_status->configure(-text => 'Actual: ' . get_fps() . ' fps');
 })->pack(-side => 'left', -padx => 5);
 
 MainLoop;
